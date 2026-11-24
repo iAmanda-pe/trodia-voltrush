@@ -175,6 +175,10 @@ button{font-family:inherit;cursor:pointer}
 #audioUI.race{bottom:auto;top:auto;right:auto;left:50%;transform:translateX(-50%);bottom:-100px}
 #muteBtn{background:none;border:none;color:#fff;font-size:18px;width:28px}
 #vol{accent-color:var(--o);width:110px}
+#padUI{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:60;background:rgba(0,0,0,.7);border:2px solid #444;border-radius:16px;padding:5px 14px;font:700 12px system-ui,sans-serif;color:#ddd;white-space:nowrap;max-width:94vw;overflow:hidden;text-overflow:ellipsis}
+#padToast{position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:70;background:var(--o);color:#000;padding:8px 20px;font-size:16px;opacity:0;pointer-events:none;box-shadow:5px 5px 0 #fff}
+#padToast.show{animation:toast 3.2s forwards}
+@keyframes toast{0%{opacity:0;transform:translate(-50%,-20px)}10%{opacity:1;transform:translate(-50%,0)}85%{opacity:1}100%{opacity:0}}
 #fade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:40;transition:opacity .3s}
 #fade.on{opacity:1}
 #err{position:fixed;left:10px;top:10px;z-index:99;background:#300;color:#fff;font:12px monospace;padding:8px;max-width:60vw;display:none;white-space:pre-wrap}
@@ -320,6 +324,7 @@ button{font-family:inherit;cursor:pointer}
 </div>
 
 <div id="audioUI"><button id="muteBtn" title="Silenciar (M)">🔊</button><input id="vol" type="range" min="0" max="100" value="70" title="Volumen"></div>
+<div id="padToast"></div>
 <div id="fade"></div>
 
 <script type="module">
@@ -769,27 +774,70 @@ const KEYMAPS = {
   j1: { up: ['KeyW'], down: ['KeyS'], left: ['KeyA'], right: ['KeyD'], drift: ['Space'], item: ['KeyE', 'ControlLeft'], look: ['KeyQ'] },
   j2: { up: ['ArrowUp'], down: ['ArrowDown'], left: ['ArrowLeft'], right: ['ArrowRight'], drift: ['ShiftRight', 'Numpad0'], item: ['ControlRight', 'Enter', 'NumpadEnter'], look: ['Slash', 'Minus', 'Period'] },
 };
-// ---------- mandos (Gamepad API, mapeo estándar) ----------
+// ---------- mandos (Gamepad API) ----------
+// Los mandos se ordenan por orden de llegada (el primero que pulsa un botón es el mando 1) y se
+// identifican por gamepad.index, que no cambia aunque otro mando se desconecte.
+// Los navegadores solo muestran un mando después de pulsar un botón en él.
 const Pads = {
-  list: [], prev: [],
+  order: [], list: [], prev: [], prevBy: {}, info: [],
+  readOne(gp) {
+    const b = gp.buttons.map(x => !!(x.pressed || x.value > 0.4)), ax = gp.axes.slice();
+    while (b.length < 17) b.push(false);
+    if (gp.mapping !== 'standard') {
+      // mandos genéricos (DirectInput): cruceta como "hat" en el eje 9, o en los ejes 6/7
+      const hat = ax.length > 9 ? ax[9] : null;
+      if (hat !== null && hat >= -1.05 && hat <= 1.05) {
+        const near = v => Math.abs(hat - v) < 0.2;
+        b[12] = b[12] || near(-1) || near(-0.71) || near(1); b[14] = b[14] || near(0.71) || near(0.43) || near(1);
+        b[15] = b[15] || near(-0.43) || near(-0.71) || near(-0.14); b[13] = b[13] || near(0.14) || near(-0.14) || near(0.43);
+      } else if (ax.length >= 8) { if (ax[6] < -0.5) b[14] = true; if (ax[6] > 0.5) b[15] = true; if (ax[7] < -0.5) b[12] = true; if (ax[7] > 0.5) b[13] = true; }
+    }
+    return { gi: gp.index, b, ax, id: gp.id, std: gp.mapping === 'standard' };
+  },
   poll() {
     const raw = navigator.getGamepads ? [...navigator.getGamepads()].filter(p => p && p.connected) : [];
-    this.prev = this.list.map(p => p.b.slice()); this.list = raw.map(p => ({ b: p.buttons.map(x => x.value > 0.4), v: p.buttons.map(x => x.value), ax: p.axes.slice() }));
+    for (const gp of raw) if (!this.order.includes(gp.index)) { this.order.push(gp.index); this.joined(gp); }
+    this.order = this.order.filter(i => raw.some(g => g.index === i));
+    this.list = this.order.map(i => this.readOne(raw.find(g => g.index === i)));
+    this.prev = this.list.map(p => this.prevBy[p.gi] || []);
+    this.prevBy = {}; for (const p of this.list) this.prevBy[p.gi] = p.b.slice();
+  },
+  joined(gp) {
+    const n = this.order.length, t = $('padToast'); if (!t) return;
+    t.textContent = `🎮 MANDO ${n} CONECTADO` + (game.numPlayers === 2 ? (n === 1 ? ' · lo usa J2 (J1 con teclado) hasta que conectes otro' : ' · J1 = mando 1 · J2 = mando 2') : '');
+    t.classList.remove('show'); void t.offsetWidth; t.classList.add('show');
+    try { AudioSys.sfxPlay('select'); } catch (e) { }
+  },
+  // qué mandos controla el jugador idx de n
+  forPlayer(idx, n) {
+    const L = this.list.length;
+    if (n === 1) return this.list.map((_, i) => i);
+    if (L >= 2) return [idx];
+    return idx === 1 && L === 1 ? [0] : [];
   },
   btn(i, k) { const p = this.list[i]; return !!(p && p.b[k]); },
   pressed(i, k) { const p = this.list[i]; return !!(p && p.b[k] && !(this.prev[i] && this.prev[i][k])); },
   released(i, k) { const p = this.list[i]; return !!(p && !p.b[k] && this.prev[i] && this.prev[i][k]); },
-  axis(i, k) { const p = this.list[i]; const v = p ? p.ax[k] || 0 : 0; return Math.abs(v) < 0.18 ? 0 : v; },
+  axis(i, k) { const p = this.list[i]; const v = p ? p.ax[k] || 0 : 0; return Math.abs(v) < 0.2 ? 0 : v; },
   // navegación de menús con cualquier mando
   menuKeys() {
-    const out = [];
+    const out = [], pa = this._ax || (this._ax = {});
     for (let i = 0; i < this.list.length; i++) {
-      const ax = this.axis(i, 0), ay = this.axis(i, 1), pa = this._ax || (this._ax = []);
+      const gi = this.list[i].gi, ax = this.axis(i, 0), ay = this.axis(i, 1);
       const dir = ay < -0.6 ? 'ArrowUp' : ay > 0.6 ? 'ArrowDown' : ax < -0.6 ? 'ArrowLeft' : ax > 0.6 ? 'ArrowRight' : null;
-      if (dir && pa[i] !== dir) out.push(dir); pa[i] = dir;
+      if (dir && pa[gi] !== dir) out.push(dir); pa[gi] = dir;
       for (const [b, code] of [[12, 'ArrowUp'], [13, 'ArrowDown'], [14, 'ArrowLeft'], [15, 'ArrowRight'], [0, 'Enter'], [1, 'Escape'], [9, 'Escape']]) if (this.pressed(i, b)) out.push(code);
     }
     return out;
+  },
+  status(n) {
+    const L = this.list.length, name = p => (p.id || 'Mando').replace(/\(.*?\)/g, '').trim().slice(0, 22);
+    if (!L) return '🎮 Sin mandos · pulsa un botón en cada mando para activarlo';
+    if (n === 2) {
+      if (L === 1) return `🎮 1 mando (${name(this.list[0])}) → J2 · J1 juega con teclado · pulsa un botón en el 2.º mando para activarlo`;
+      return `🎮 J1: mando 1 (${name(this.list[0])}) · J2: mando 2 (${name(this.list[1])})`;
+    }
+    return `🎮 ${L} mando${L > 1 ? 's' : ''} activo${L > 1 ? 's' : ''}` + (L === 1 ? ' · si tienes otro, pulsa un botón en él' : '');
   },
 };
 // lee los controles de un jugador humano: jugador idx de n
@@ -798,7 +846,7 @@ const Input = {
     const m = n === 1 ? KEYMAPS.solo : idx === 0 ? KEYMAPS.j1 : KEYMAPS.j2;
     const has = l => l.some(k => Keys.down.has(k)), pr = l => l.some(k => Keys.pressed.has(k)), rl = l => l.some(k => Keys.released.has(k));
     // mando asignado: con 1 jugador, cualquiera; con 2, J1 = mando 1 y J2 = mando 2 (si solo hay uno, es de J2)
-    const pads = n === 1 ? Pads.list.map((_, i) => i) : Pads.list.length >= 2 ? [idx] : (idx === 1 ? [0] : []);
+    const pads = Pads.forPlayer(idx, n);
     const pb = k => pads.some(i => Pads.btn(i, k)), pp = k => pads.some(i => Pads.pressed(i, k)), prl = k => pads.some(i => Pads.released(i, k));
     let ax = 0; for (const i of pads) ax += Pads.axis(i, 0);
     const I = c.in;
@@ -809,7 +857,7 @@ const Input = {
     I.back = has(m.down) || pb(13) || pb(1);
     c.lookBack = has(m.look) || pb(8) || pb(10);
   },
-  throttle(idx, n) { const m = n === 1 ? KEYMAPS.solo : idx === 0 ? KEYMAPS.j1 : KEYMAPS.j2; const pads = n === 1 ? Pads.list.map((_, i) => i) : Pads.list.length >= 2 ? [idx] : (idx === 1 ? [0] : []);
+  throttle(idx, n) { const m = n === 1 ? KEYMAPS.solo : idx === 0 ? KEYMAPS.j1 : KEYMAPS.j2; const pads = Pads.forPlayer(idx, n);
     return m.up.some(k => Keys.down.has(k)) || pads.some(i => Pads.btn(i, 7) || Pads.btn(i, 0)); },
 };
 
@@ -2877,16 +2925,15 @@ const game = {
   mode: 'gp', diff: DIFFS[1], pilot: 0, pilots: [0], numPlayers: 1, state: 'loading', prevState: null, world: null, cars: [], player: null, humans: [], ranked: [],
   raceT: 0, simT: 0, cdT: 0, canDrive: false, cup: 0, standings: null, standSnap: null, t: 0, acc: 0, views: [], nViews: 1,
   finishT: 0, finishWait: 0, lastLight: -1, battleEnd: 0, ftAvg: 16, ftT: 0,
-  quality: 1, qMode: 'auto', qLevel: 2, qDowns: 0, ftUp: 0,
+  quality: 1, qMode: 'auto', qLevel: 1, qDowns: 0, ftUp: 0,
   // niveles de calidad: resolución interna, antialias, sombras y resolución del bloom
   QUALITY: [
     { name: 'BAJA', pr: () => 0.75, samples: 0, shadow: 1024, bloomK: 0.3, decor: false },
     { name: 'MEDIA', pr: () => Math.min(window.devicePixelRatio || 1, 1), samples: 2, shadow: 1024, bloomK: 0.45, decor: false },
-    { name: 'ALTA', pr: () => Math.min(window.devicePixelRatio || 1, 1.5), samples: 4, shadow: 2048, bloomK: 0.5, decor: true },
   ],
   get Q() { return this.QUALITY[this.qLevel]; },
   applyQuality(level) {
-    this.qLevel = clamp(level, 0, 2); const Q = this.Q;
+    this.qLevel = clamp(level, 0, 1); const Q = this.Q;
     this.quality = Q.pr(); this.bloomK = Q.bloomK;
     for (const v of this.views) for (const rt of [v.composer.renderTarget1, v.composer.renderTarget2]) if (rt.samples !== Q.samples) { rt.samples = Q.samples; rt.dispose(); }
     if (this.world && this.world.sun) { const d = this.world.sun; if (d.shadow.mapSize.x !== Q.shadow) { d.shadow.mapSize.set(Q.shadow, Q.shadow); if (d.shadow.map) { d.shadow.map.dispose(); d.shadow.map = null; } } }
@@ -2894,7 +2941,7 @@ const game = {
     if (this.views.length) this.resize();
     Menu.qualityLabel && Menu.qualityLabel();
   },
-  setQualityMode(m) { this.qMode = m; this.qDowns = 0; this.applyQuality(m === 'auto' ? (this.humans.length > 1 ? 1 : 2) : { alta: 2, media: 1, baja: 0 }[m]); },
+  setQualityMode(m) { if (!['auto', 'media', 'baja'].includes(m)) m = 'auto'; this.qMode = m; this.qDowns = 0; this.applyQuality(m === 'auto' ? 1 : { media: 1, baja: 0 }[m]); },
   humanDist(p) { let d = 1e9; for (const h of this.humans) d = Math.min(d, h.pos.distanceTo(p)); return d; },
 
   init() {
@@ -2916,7 +2963,7 @@ const game = {
       this.views.push({ rig, composer, renderPass, bloom });
     }
     this.composer = this.views[0].composer; this.renderPass = this.views[0].renderPass; this.bloom = this.views[0].bloom;
-    this.qLevel = 2; this.quality = this.Q.pr(); this.bloomK = this.Q.bloomK; this.layout(1);
+    this.qLevel = 1; this.quality = this.Q.pr(); this.bloomK = this.Q.bloomK; this.layout(1);
     addEventListener('resize', () => this.resize());
     addEventListener('beforeunload', e => { if (['race', 'countdown', 'finish', 'paused'].includes(this.state)) { e.preventDefault(); e.returnValue = ''; } });
     this.buildMenuScene();
@@ -3002,7 +3049,7 @@ const game = {
   },
   beginCountdown() {
     this.state = 'countdown'; this.cdT = 4.4; this.raceT = 0; this.simT = 0; this.canDrive = false; this.lastLight = -1; this.acc = 0; this.battleEnd = 0; this.finishWait = 0;
-    const n = this.humans.length; this.nViews = n; if (this.qMode === 'auto') { this.qDowns = 0; this.applyQuality(Math.min(this.qLevel, n > 1 ? 1 : 2)); } else this.applyQuality(this.qLevel); HUD.layout(n);
+    const n = this.humans.length; this.nViews = n; if (this.qMode === 'auto') { this.qDowns = 0; this.applyQuality(1); } else this.applyQuality(this.qLevel); HUD.layout(n);
     this.humans.forEach(h => { h.rig.intro = 3.6; h.rig.snap(h); h.rig.shakeA = 0; h.rig.base = n > 1 ? 46 : 68; h.rig.fov = h.rig.base; });
     HUD.show(true); HUD.sema(0, false, true);
     $('audioUI').style.display = 'none';
@@ -3049,6 +3096,7 @@ const game = {
     let dt = (now - this.last) / 1000; this.last = now; dt = Math.min(dt, 0.05);
     this.t += dt; TIME_UNI.value = this.t;
     Pads.poll();
+
     for (const code of Pads.menuKeys()) {
       const ev = { code, preventDefault() { } };
       if (Menu.cur || this.state === 'loading') onKeyDown(ev);
@@ -3069,7 +3117,7 @@ const game = {
     this.ftAvg = lerp(this.ftAvg, Math.min(dt, 0.1) * 1000, 0.05); this.ftT += dt;
     if (this.ftT < 2) return;
     if (this.ftAvg > 21 && this.qLevel > 0) { this.qDowns++; this.applyQuality(this.qLevel - 1); this.ftT = 0; this.ftAvg = 16; this.ftUp = 0; return; }
-    if (this.ftAvg < 12.5 && this.qLevel < 2 && this.qDowns === 0) { this.ftUp += dt; if (this.ftUp > 8) { this.applyQuality(this.qLevel + 1); this.ftUp = 0; this.ftT = 0; } } else this.ftUp = 0;
+    if (this.ftAvg < 12.5 && this.qLevel < 1 && this.qDowns === 0) { this.ftUp += dt; if (this.ftUp > 8) { this.applyQuality(this.qLevel + 1); this.ftUp = 0; this.ftT = 0; } } else this.ftUp = 0;
   },
   readPlayers() {
     const n = this.humans.length;
@@ -3453,7 +3501,7 @@ const Menu = {
         if (game.mode === 'gp') this.show('cup'); else { game.state = 'starting'; game.startBattle(); } break; }
       case 'startcup': game.state = 'starting'; game.startCup(); break;
       case 'resume': game.resume(); break;
-      case 'quality': { const m = ['auto', 'alta', 'media', 'baja']; game.setQualityMode(m[(m.indexOf(game.qMode) + 1) % 4]); break; }
+      case 'quality': { const m = ['auto', 'media', 'baja']; game.setQualityMode(m[(m.indexOf(game.qMode) + 1) % 3]); break; }
       case 'restart': game.restart(); break;
       case 'quit': game.quit(); break;
       case 'tomenu': game.quit(); break;
